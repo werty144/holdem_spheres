@@ -105,6 +105,13 @@ bool operator==(const Triangle& a, const Triangle& b) {
     return a.hand3 == b.hand3;
 }
 
+template<>
+struct std::hash<Triangle> {
+    size_t operator()(const Triangle& triangle) const noexcept {
+        return triangle.hand1 * N_HANDS * N_HANDS + triangle.hand2 * N_HANDS + triangle.hand3;
+    }
+};
+
 
 
 int compare(Triangle& a, Triangle& b, graph& preflop_graph) {
@@ -249,14 +256,14 @@ void count_triangle_graph_edges(graph& preflop_graph, std::vector<Triangle>& tri
 }
 
 std::vector<Triangle> get_triangle_outgoing_edges(
-    Triangle& triangle,
-    std::vector<std::vector<Triangle>>& triangles_beaten_by_hand,
-    graph preflop_graph
+    const Triangle& triangle,
+    const std::vector<std::vector<Triangle>>& triangles_beaten_by_hand,
+    const graph& preflop_graph
     ) {
     std::vector<Triangle> out;
-    auto a = triangles_beaten_by_hand[triangle.hand1];
-    auto b = triangles_beaten_by_hand[triangle.hand2];
-    auto c = triangles_beaten_by_hand[triangle.hand3];
+    auto& a = triangles_beaten_by_hand[triangle.hand1];
+    auto& b = triangles_beaten_by_hand[triangle.hand2];
+    auto& c = triangles_beaten_by_hand[triangle.hand3];
 
     if (a.size() <= b.size() && a.size() <= c.size()) {
         for (auto &candidate_triangle : a) {
@@ -404,7 +411,201 @@ std::vector<std::vector<Triangle>> triangles_beaten_by_hand(std::vector<Triangle
 
     auto futures = pool.submit_sequence(0, N_HANDS, jobs);
     return futures.get();
+
+    // std::vector<std::vector<Triangle>> results;
+    // results.reserve(N_HANDS);
+    // for (int i = 0; i < N_HANDS; i++) {
+    //     results.emplace_back(jobs(i));
+    // }
+    // return results;
 }
+
+std::vector<uint8_t> generate(uint8_t k) {
+    uint32_t upper = (1u << k) - 1; // highest allowed mask
+    std::vector<uint8_t> vals;
+
+    for (uint32_t x = 0; x <= upper; ++x) {
+        vals.push_back((uint8_t)x);
+    }
+
+    std::sort(vals.begin(), vals.end(),
+              [](uint8_t a, uint8_t b) {
+                  int pa = __builtin_popcount(a);
+                  int pb = __builtin_popcount(b);
+                  return pa < pb || (pa == pb && a < b);
+              });
+
+    return vals;
+}
+
+
+void print_binary(uint8_t x) {
+    for (int i = 7; i >= 0; --i) {
+        std::cout << ((x >> i) & 1);
+    }
+}
+
+void restore_answer(
+    Triangle& triangle,
+    uint8_t color_subset,
+    std::vector<std::vector<bool>>& dp,
+    graph& preflop_graph,
+    std::vector<std::vector<Triangle>>& triangles_beaten_by_hand,
+    std::vector<uint8_t>& colors,
+    std::unordered_map<Triangle, size_t>& triangle_2_idx
+) {
+    print_triangle(triangle);
+    if (color_subset == 0) return;
+
+    auto triangle_ixd = triangle_2_idx[triangle];
+    auto triangle_color = colors[triangle_ixd];
+    uint8_t next_color_subset = color_subset ^ triangle_color;
+
+    auto& a = triangles_beaten_by_hand[triangle.hand1];
+    auto& b = triangles_beaten_by_hand[triangle.hand2];
+    auto& c = triangles_beaten_by_hand[triangle.hand3];
+    std::vector<Triangle>& shortest_list = a;
+    if (shortest_list.size() > b.size()) shortest_list = b;
+    if (shortest_list.size() > c.size()) shortest_list = c;
+
+    for (auto& potential_neighbor: shortest_list) {
+        if (compare(triangle, potential_neighbor, preflop_graph) == -1) {
+            auto neighbor_idx = triangle_2_idx[potential_neighbor];
+            if (dp[next_color_subset][neighbor_idx]) {
+                restore_answer(
+                    potential_neighbor,
+                    next_color_subset,
+                    dp,
+                    preflop_graph,
+                    triangles_beaten_by_hand,
+                    colors,
+                    triangle_2_idx
+                );
+                return;
+            }
+        }
+    }
+}
+
+bool check_dp(
+    int k,
+    std::vector<std::vector<bool>>& dp,
+    graph& preflop_graph,
+    std::vector<Triangle>& triangles,
+    std::vector<std::vector<Triangle>>& triangles_beaten_by_hand,
+    std::vector<uint8_t>& colors,
+    std::unordered_map<Triangle, size_t>& triangle_2_idx
+) {
+    uint8_t rainbow = (1 << k) - 1;
+
+    for (size_t triangle_idx = 0; triangle_idx < triangles.size(); ++triangle_idx) {
+        if (!dp[rainbow][triangle_idx]) continue;
+        std::cout << "Found " << k << " path!" << std::endl;
+        restore_answer(
+            triangles[triangle_idx],
+            rainbow,
+            dp,
+            preflop_graph,
+            triangles_beaten_by_hand,
+            colors,
+            triangle_2_idx);
+        return true;
+    }
+    return false;
+}
+
+void colored_path(
+    graph& preflop_graph,
+    std::vector<Triangle>& triangles,
+    std::vector<std::vector<Triangle>>& triangles_beaten_by_hand,
+    int k
+) {
+    std::random_device rd;              // seed
+    std::mt19937 gen(rd());             // Mersenne RNG
+    std::uniform_int_distribution<int> dist(0, k - 1);
+
+    std::unordered_map<Triangle, size_t> triangle_2_idx;
+    for (size_t i = 0; i < triangles.size(); ++i) {
+        triangle_2_idx[triangles[i]] = i;
+    }
+
+    int n_iterations = 20;
+
+    for (size_t it = 0; it < n_iterations; it++) {
+        std::vector<uint8_t> colors(N_TRIANGLES);
+
+        for (size_t i = 0; i < N_TRIANGLES; i++) {
+            colors[i] = 1 << dist(gen);
+        }
+
+        auto color_subsets = generate(k);
+        size_t n_color_subsets = color_subsets.size();
+        std::vector<std::vector<bool>> dp(n_color_subsets);
+
+        for (size_t i = 0; i < n_color_subsets; i++) {
+            std::vector<bool> row(N_TRIANGLES);
+            dp[i] = row;
+        }
+
+        for (size_t i = 0; i < N_TRIANGLES; i++) {
+            dp[colors[i]][i] = true;
+        }
+
+        std::cout << "Start coloring" << std::endl;
+        for (auto &color_subset : generate(k)) {
+            if (__builtin_popcount(color_subset) < 2) continue;
+            print_binary(color_subset);
+            std::cout << std::endl;
+            BS::thread_pool pool;
+            auto jobs =[
+                &colors,
+                &color_subset,
+                &triangles,
+                &preflop_graph,
+                &triangles_beaten_by_hand,
+                &triangle_2_idx,
+                &dp
+                ](size_t triangle_idx)    {
+                    if ((colors[triangle_idx] & color_subset) == 0) return;
+                    uint8_t colors_left = color_subset ^ colors[triangle_idx];
+
+                    Triangle current_triangle = triangles[triangle_idx];
+                    // auto neighbors = get_triangle_outgoing_edges(
+                    //     current_triangle,
+                    //     triangles_beaten_by_hand,
+                    //     preflop_graph);
+
+                    auto& a = triangles_beaten_by_hand[current_triangle.hand1];
+                    auto& b = triangles_beaten_by_hand[current_triangle.hand2];
+                    auto& c = triangles_beaten_by_hand[current_triangle.hand3];
+                    std::vector<Triangle>& shortest_list = a;
+                    if (shortest_list.size() > b.size()) shortest_list = b;
+                    if (shortest_list.size() > c.size()) shortest_list = c;
+
+                    for (auto& potential_neighbor: shortest_list) {
+                        if (compare(current_triangle, potential_neighbor, preflop_graph) == -1) {
+                            auto neighbor_idx = triangle_2_idx[potential_neighbor];
+                            if (dp[colors_left][neighbor_idx]) {
+                                dp[color_subset][triangle_idx] = true;
+                                break;
+                            }
+                        }
+                    }
+            };
+            auto futures = pool.submit_loop(0, N_TRIANGLES, jobs);
+            futures.get();
+        }
+        bool success = check_dp(k,
+            dp,
+            preflop_graph,
+            triangles,
+            triangles_beaten_by_hand,
+            colors,
+            triangle_2_idx);
+        if (success) return;
+    }
+}
+
 
 
 void playground1() {
@@ -416,24 +617,7 @@ void playground1() {
     auto triangles_beaten = triangles_beaten_by_hand(triangles, preflop_graph);
     std::cout << "Computed triangles beaten" << std::endl;
 
-    auto all_hands = get_all_hands();
-
-    size_t total = 0;
-    for (int i = 0; i < N_HANDS; i++) {
-        std::cout << all_hands[i] << ": " << triangles_beaten[i].size() << std::endl;
-        total += triangles_beaten[i].size();
-    }
-    std::cout << total * 1.0 / N_HANDS << std::endl;
-
-    auto pre_low_triangle = Triangle(
-        Hand("5h", "4d"),
-            Hand("5d", "4c"),
-            Hand("5c", "4h"),
-            hand_2_idx
-    );
-    for (auto &triangle : get_triangle_outgoing_edges(pre_low_triangle, triangles_beaten, preflop_graph)) {
-        std::cout << all_hands[triangle.hand1] << " " << all_hands[triangle.hand2] << " " << all_hands[triangle.hand3] << std::endl;
-    }
+    colored_path(preflop_graph, triangles, triangles_beaten, 7);
 }
 
 void playground2() {
